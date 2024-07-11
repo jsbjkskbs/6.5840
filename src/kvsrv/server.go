@@ -42,7 +42,7 @@ func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 	defer kv.mu.Unlock()
 
 	old, ok := kv.oldData[args.Nrand]
-	if ok && old.CurrentOp == args.Op {
+	if ok && old.CurrentOp >= args.Op {
 		return
 	}
 
@@ -55,7 +55,7 @@ func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 	defer kv.mu.Unlock()
 
 	old, ok := kv.oldData[args.Nrand]
-	if ok && old.CurrentOp == args.Op {
+	if ok && old.CurrentOp >= args.Op {
 		reply.Value = old.Legacy
 		return
 	}
