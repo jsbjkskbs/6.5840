@@ -128,8 +128,8 @@ func (c *Coordinator) RequestTask(args *Args, reply *Reply) error {
 }
 
 func (c *Coordinator) ReportTask(args *Args, reply *Reply) error {
-	c.Mutex.Lock()
-	defer c.Mutex.Unlock()
+	//c.Lock()
+	//defer c.Unlock()
 
 	switch args.TaskType {
 	case MapTask:
