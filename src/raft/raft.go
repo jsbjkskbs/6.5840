@@ -97,7 +97,7 @@ type Raft struct {
 	tick   *time.Ticker
 }
 
-func (rf *Raft) heartbeat() {
+func (rf *Raft) delayElection() {
 	rf.tick.Reset(time.Duration(HeartBeatMinTime+rand.Int63()%HeartBeatRangeSize) * time.Millisecond)
 }
 
@@ -385,7 +385,7 @@ func (rf *Raft) election() {
 	for {
 		select {
 		case <-rf.tick.C:
-			rf.heartbeat()
+			rf.delayElection()
 			/*
 				不能用rf.signal<-1，因为在同一个select块内
 			*/
@@ -438,7 +438,7 @@ func (rf *Raft) election() {
 				}(args, i, &voteCount)
 			}
 		case <-rf.signal:
-			rf.heartbeat()
+			rf.delayElection()
 		}
 	}
 }
