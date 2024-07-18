@@ -58,8 +58,8 @@ type LogEntries struct {
 const (
 	NoVote = -1
 	// 不能太大
-	HeartBeatMinTime   = 150
-	HeartBeatRangeSize = 150
+	HeartBeatMinTime   = 300
+	HeartBeatRangeSize = 100
 )
 
 const (
@@ -377,7 +377,7 @@ func (rf *Raft) ticker() {
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		// ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(50) * time.Millisecond)
+		time.Sleep(time.Duration(100) * time.Millisecond)
 	}
 }
 
@@ -463,7 +463,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower
 	rf.currentTerm = 0
 	rf.votedFor = NoVote
-	rf.tick = time.NewTicker(time.Duration(150+(rand.Int63()%150)) * time.Millisecond)
+	rf.tick = time.NewTicker(time.Duration(HeartBeatMinTime+(rand.Int63()%HeartBeatRangeSize)) * time.Millisecond)
 
 	rf.signal = make(chan int)
 
