@@ -265,6 +265,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	reply.VoteGranted = false
+	
 	if args.Term > rf.currentTerm {
 		rf.signal <- 1
 		rf.state = Follower
@@ -277,9 +279,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.votedFor = args.CandidateId
 			reply.VoteGranted = true
 		}
-	} else {
-		reply.VoteGranted = false
 	}
+
 	reply.Term = rf.currentTerm
 }
 
