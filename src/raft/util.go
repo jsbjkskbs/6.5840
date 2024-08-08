@@ -9,17 +9,22 @@ import (
 )
 
 // Debugging
-const Debug = true
+const Debug = false
+const IgnoreServer = true
 const IgnoreDLogDetails = true
 const IgnoreRPC = true
-const RandomIgnoreRPC = true
+const RandomIgnoreRPC = false
 const ShowApplier = false
-const ShowConflictX = true
+const ShowConflictX = false
 
 func DPrintf(format string, a ...interface{}) {
 	if Debug {
 		log.Printf(format, a...)
 	}
+}
+
+func getDebugID(rf *Raft) string {
+	return fmt.Sprint(rf.me)
 }
 
 type DLogFMT struct {
@@ -65,13 +70,16 @@ func DLogSprint(rf *Raft) (result string) {
 }
 
 type DServerFMT struct {
-	id         int
+	id          int
 	term        int
 	votedFor    int
 	commitIndex int
 	lastApplied int
 	voteCount   int
 	role        string
+
+	lastIncludedIndex int
+	lastIncludedTerm  int
 }
 
 func DServerSprint(rf *Raft) (result string) {
@@ -80,12 +88,15 @@ func DServerSprint(rf *Raft) (result string) {
 			defer rf.mu.Unlock()
 		}
 		dserver := DServerFMT{
-			id:         rf.me,
+			id:          rf.me,
 			term:        rf.currentTerm,
 			votedFor:    rf.votedFor,
 			commitIndex: rf.commitIndex,
 			lastApplied: rf.lastApplied,
 			voteCount:   rf.voteCount,
+
+			lastIncludedIndex: rf.lastIncludedIndex,
+			lastIncludedTerm:  rf.lastIncludedTerm,
 		}
 
 		dserver.role = getRoleString(rf)
@@ -96,20 +107,49 @@ func DServerSprint(rf *Raft) (result string) {
 }
 
 func DServerPrint(rf *Raft) {
-	debugID := rand.Int63() % 1000
-	DPrintf("DEBUG[%03d]: %v", debugID, DServerSprint(rf))
-	DPrintf("DEBUG[%03d]: %v", debugID, DLogSprint(rf))
+	if IgnoreServer {
+		return
+	}
+	debugID := getDebugID(rf)
+	DPrintf("DEBUG[%v]: %v", debugID, DServerSprint(rf))
+	DPrintf("DEBUG[%v]: %v", debugID, DLogSprint(rf))
 }
 
 type DApplier struct {
 	id          int
-	index       int
-	term        int
 	commitIndex int
 	lastApplied int
+
+	commandValid bool
+	commandIndex int
+	commandTerm  int
+
+	snapshotValid     bool
+	lastIncludedIndex int
+	lastIncludedTerm  int
 }
 
-func DApplierPrint(rf *Raft, lastApplyLog Entry) {
+func (d *DApplier) ApplyWithLog(rf *Raft) {
+	d.id = rf.me
+	d.commitIndex = rf.commitIndex
+	d.lastApplied = rf.lastApplied
+	d.commandValid = true
+	d.commandIndex = rf.lastApplied
+	d.commandTerm = rf.log[rf.getPhysicalIndex(rf.lastApplied)].Term
+	d.lastIncludedIndex = rf.lastIncludedIndex
+	d.lastIncludedTerm = rf.lastIncludedTerm
+}
+
+func (d *DApplier) ApplyWithSnapshot(rf *Raft) {
+	d.id = rf.me
+	d.commitIndex = rf.commitIndex
+	d.lastApplied = rf.lastApplied
+	d.snapshotValid = true
+	d.lastIncludedIndex = rf.lastIncludedIndex
+	d.lastIncludedTerm = rf.lastIncludedTerm
+}
+
+func DApplierPrint(rf *Raft, d *DApplier) {
 	if !Debug {
 		return
 	}
@@ -122,15 +162,8 @@ func DApplierPrint(rf *Raft, lastApplyLog Entry) {
 		defer rf.mu.Unlock()
 	}
 
-	dapplier := DApplier{
-		id:          rf.me,
-		index:       lastApplyLog.Index,
-		term:        lastApplyLog.Term,
-		commitIndex: rf.commitIndex,
-		lastApplied: rf.lastApplied,
-	}
-	debugID := rand.Int63() % 1000
-	DPrintf("DEBUG[%03d]: %#v", debugID, dapplier)
+	debugID := getDebugID(rf)
+	DPrintf("DEBUG[%v]: %#v", debugID, *d)
 }
 
 type DRPC struct {
@@ -161,8 +194,8 @@ func DRPCPrint(rf *Raft, rpc interface{}) {
 		id:      rf.me,
 		details: fmt.Sprintf("%#v", rpc),
 	}
-	debugID := rand.Int63() % 1000
-	DPrintf("DEBUG[%03d]: %#v", debugID, drpc)
+	debugID := getDebugID(rf)
+	DPrintf("DEBUG[%v]: %#v", debugID, drpc)
 }
 
 // lab 3C
@@ -193,7 +226,7 @@ func DXConflictPrint(rf *Raft, args *AppendEntriesArgs, reply *AppendEntriesRepl
 		logDetails := fmt.Sprint(rf.log[reply.XIndex].Command)
 		hash := md5.Sum([]byte(logDetails))
 		logSnapshot := hex.EncodeToString(hash[:])
-		debugID := rand.Int63() % 1000
+		debugID := getDebugID(rf)
 
 		dXConflict := DXConflict{
 			id:     rf.me,
@@ -209,7 +242,7 @@ func DXConflictPrint(rf *Raft, args *AppendEntriesArgs, reply *AppendEntriesRepl
 
 		dXConflict.role = getRoleString(rf)
 
-		DPrintf("DEBUG[%03d]: %#v", debugID, dXConflict)
+		DPrintf("DEBUG[%v]: %#v", debugID, dXConflict)
 	}
 }
 

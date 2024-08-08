@@ -125,8 +125,8 @@ func (rf *Raft) checkVote(id int, args *RequestVoteArgs) {
 		// If votes received from majority of servers: become leader
 		rf.ConvertToLeader()
 		for i := range rf.nextIndex {
-			rf.nextIndex[i] = len(rf.log)
-			rf.matchIndex[i] = 0
+			rf.nextIndex[i] = rf.getLogicalIndex(len(rf.log))
+			rf.matchIndex[i] = rf.lastIncludedIndex
 		}
 		go rf.heartbeat()
 	}
@@ -160,19 +160,33 @@ func (rf *Raft) heartbeat() {
 			}
 
 			// If last log index ≥ nextIndex for a follower: send AppendEntries RPC with log entries starting at nextIndex
-			if len(rf.log)-1 > args.PrevLogIndex {
-				args.Log = rf.log[args.PrevLogIndex+1:]
+			sendSnapshot := false
+			if args.PrevLogIndex < rf.lastIncludedIndex {
+				sendSnapshot = true
+			} else if rf.getLogicalIndex(len(rf.log)-1) > args.PrevLogIndex {
+				args.Log = rf.log[rf.getPhysicalIndex(args.PrevLogIndex+1):]
 			} else {
 				args.Log = make([]Entry, 0)
 			}
-			args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
 
-			// if len(args.Log) == 0
-			// Upon election: send initial empty AppendEntries RPCs
-			// (heartbeat) to each server; repeat during idle periods to
-			// prevent election timeouts (§5.2)
+			if sendSnapshot {
+				go rf.postInstallSnapshot(i, &InstallSnapshotArgs{
+					Term:              rf.currentTerm,
+					LeaderId:          rf.me,
+					LastIncludedIndex: rf.lastIncludedIndex,
+					LastIncludedTerm:  rf.lastIncludedTerm,
+					Data:              rf.snapshot,
+				})
+			} else {
+				args.PrevLogTerm = rf.log[rf.getPhysicalIndex(args.PrevLogIndex)].Term
 
-			go rf.postAppendEntries(i, args)
+				// if len(args.Log) == 0
+				// Upon election: send initial empty AppendEntries RPCs
+				// (heartbeat) to each server; repeat during idle periods to
+				// prevent election timeouts (§5.2)
+
+				go rf.postAppendEntries(i, args)
+			}
 		}
 
 		rf.mu.Unlock()
@@ -189,13 +203,17 @@ func (rf *Raft) postAppendEntries(id int, args *AppendEntriesArgs) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	if rf.role != Leader {
+		return
+	}
+
 	if args.Term != rf.currentTerm {
 		return
 	}
 
 	// If successful: update nextIndex and matchIndex for follower (§5.3)
 	if reply.Success {
-		rf.matchIndex[id] = args.PrevLogIndex + len(args.Log)
+		rf.matchIndex[id] = max(rf.matchIndex[id], args.PrevLogIndex+len(args.Log))
 		rf.nextIndex[id] = rf.matchIndex[id] + 1
 
 		// If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N, and log[N].term == currentTerm:
@@ -223,20 +241,22 @@ func (rf *Raft) postAppendEntries(id int, args *AppendEntriesArgs) {
 		// Case 3: follower's log is too short:
 		//	nextIndex = XLen
 		if reply.XTerm == -1 {
-			rf.nextIndex[id] = reply.XLen
+			rf.nextIndex[id] = max(rf.lastIncludedIndex, reply.XLen)
 			return
 		}
 
 		// try to find XTerm
-		rollbackPoint := rf.nextIndex[id] - 1
-		for rollbackPoint > 0 && rf.log[rollbackPoint].Term > reply.XTerm {
+		rollbackPoint := max(rf.lastIncludedIndex, rf.nextIndex[id]-1)
+		for rollbackPoint > rf.lastIncludedIndex && rf.log[rf.getPhysicalIndex(rollbackPoint)].Term > reply.XTerm {
 			rollbackPoint--
 		}
 
-		if rf.log[rollbackPoint].Term != reply.XTerm {
+		if rollbackPoint == rf.lastIncludedIndex && rf.log[rf.getPhysicalIndex(rollbackPoint)].Term > reply.XTerm {
+			rf.nextIndex[id] = rf.lastIncludedIndex
+		} else if rf.log[rf.getPhysicalIndex(rollbackPoint)].Term != reply.XTerm {
 			// Case 1: leader doesn't have XTerm:
 			// 	nextIndex = XIndex
-			rf.nextIndex[id] = reply.XIndex
+			rf.nextIndex[id] = max(rf.lastIncludedIndex, reply.XIndex)
 		} else {
 			// Case 2: leader has XTerm:
 			//	nextIndex = leader's last entry for XTerm
@@ -247,14 +267,14 @@ func (rf *Raft) postAppendEntries(id int, args *AppendEntriesArgs) {
 
 // 定向到match过半数的最近index
 func (rf *Raft) seekSynchronizedIndex() int {
-	synchronizedIndex := len(rf.log) - 1
+	synchronizedIndex := rf.getLogicalIndex(len(rf.log) - 1)
 	for synchronizedIndex > rf.commitIndex {
 		synchronizedPeers := 1
 		for i := range rf.peers {
 			if i == rf.me {
 				continue
 			}
-			if rf.matchIndex[i] >= synchronizedIndex && rf.log[synchronizedIndex].Term == rf.currentTerm {
+			if rf.matchIndex[i] >= synchronizedIndex && rf.log[rf.getPhysicalIndex(synchronizedIndex)].Term == rf.currentTerm {
 				synchronizedPeers++
 			}
 		}
@@ -287,10 +307,66 @@ func (rf *Raft) isCandidateLogReliable(args *RequestVoteArgs) bool {
 		return true
 	}
 	// 日志任期一致,但Candidate更长
-	if args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= len(rf.log)-1 {
+	if args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= rf.getLogicalIndex(len(rf.log)-1) {
 		return true
 	}
 	return false
 }
 
 // ---------------------------------------------------------------
+// 					snapshot
+
+func (rf *Raft) getPhysicalIndex(index int) int {
+	return index - rf.lastIncludedIndex
+}
+
+func (rf *Raft) getLogicalIndex(index int) int {
+	return index + rf.lastIncludedIndex
+}
+
+func (rf *Raft) acceptSnapshot(index int) bool {
+	return rf.commitIndex >= index &&
+		index > rf.lastIncludedIndex
+}
+
+func (rf *Raft) hasAppliedBySnapshot() bool {
+	return rf.lastApplied <= rf.lastIncludedIndex
+}
+
+func (rf *Raft) hasInstalled(lastIncludedIndex int) bool {
+	return lastIncludedIndex < rf.lastIncludedIndex ||
+		lastIncludedIndex < rf.commitIndex
+}
+
+func (rf *Raft) hasExtraLogEntries(lastIncludedIndex int) bool {
+	return rf.getPhysicalIndex(lastIncludedIndex) < len(rf.log) &&
+		rf.log[rf.getPhysicalIndex(lastIncludedIndex)].Term == lastIncludedIndex
+}
+
+func (rf *Raft) postInstallSnapshot(id int, args *InstallSnapshotArgs) {
+	reply := &InstallSnapshotReply{}
+	if ok := rf.sendInstallSnapshot(id, args, reply); !ok {
+		return
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.role != Leader {
+		return
+	}
+
+	if args.Term != rf.currentTerm {
+		return
+	}
+
+	if reply.Term > rf.currentTerm {
+		rf.ConvertToFollower(reply.Term)
+		rf.delayElection()
+		rf.persist()
+		return
+	}
+
+	rf.matchIndex[id] = max(rf.matchIndex[id], args.LastIncludedIndex)
+	rf.nextIndex[id] = rf.matchIndex[id] + 1
+}
