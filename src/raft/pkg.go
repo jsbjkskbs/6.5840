@@ -1,15 +1,14 @@
 package raft
 
-import "time"
-
 const (
 	NoVote   = -1
 	InitTerm = 0
 
 	// 推迟选举的时间不能太长
-	DelayElectionMinTime   = 300
-	DelayElectionRangeSize = 100
+	DelayElectionMinTime   = 450
+	DelayElectionRangeSize = 150
 	HeartbeatInterval      = 100
+	FastOperateTime        = 10
 )
 
 const (
@@ -139,6 +138,7 @@ func (rf *Raft) checkVote(id int, args *RequestVoteArgs) {
 
 func (rf *Raft) heartbeat() {
 	for !rf.killed() {
+		<-rf.heartbeatTicker.C
 		rf.mu.Lock()
 		// defer rf.mu.Unlock()
 		if rf.role != Leader {
@@ -190,7 +190,7 @@ func (rf *Raft) heartbeat() {
 		}
 
 		rf.mu.Unlock()
-		time.Sleep(time.Duration(HeartbeatInterval) * time.Millisecond)
+		rf.resetHeartbeat()
 	}
 }
 

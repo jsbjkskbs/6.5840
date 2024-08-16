@@ -43,6 +43,9 @@ type ApplyMsg struct {
 	Command      interface{}
 	CommandIndex int
 
+	// For 4A:
+	CommandTerm int
+
 	// For 3D:
 	SnapshotValid bool
 	Snapshot      []byte
@@ -87,6 +90,12 @@ type Raft struct {
 	// voteCount单独享用一个锁比之前与其他变量共用 raft.mu 这个互斥锁更合理
 	// electionTicker作用与之前一致
 
+	heartbeatTicker *time.Ticker // for the fast ops complete, you know
+	// Lab 4 Test: ops complete fast enough (4A) ...
+	// 操作取决于心跳速度，也就是说不能用Lazy Sync的方法
+	// 一般地，心跳为100ms
+	// 收到日志后，心跳重置为<33ms
+
 	role int // leader, follower or candicate
 
 	applyCh   chan ApplyMsg // commit log entries (the log you're sure to apply in the state machine)
@@ -102,6 +111,14 @@ type Raft struct {
 // 推迟选举
 func (rf *Raft) delayElection() {
 	rf.electionTicker.Reset(time.Duration(DelayElectionMinTime+rand.Int63()%DelayElectionRangeSize) * time.Millisecond)
+}
+
+func (rf *Raft) resetHeartbeat() {
+	rf.heartbeatTicker.Reset(time.Duration(HeartbeatInterval) * time.Millisecond)
+}
+
+func (rf *Raft) fastOpt() {
+	rf.heartbeatTicker.Reset(time.Duration(FastOperateTime) * time.Millisecond)
 }
 
 // return currentTerm and whether this server
@@ -212,13 +229,13 @@ func (rf *Raft) commit() {
 			// DPrintf("Commiter Wake Up: {id: %v,rf.commitIndex: %v,rf.lastApplied: %v}", rf.me, rf.commitIndex, rf.lastApplied)
 		}
 		/*
-			sync.Cond.Wait():
-				c.checker.check()
-				t := runtime_notifyListAdd(&c.notify)
-				c.L.Unlock()
-				runtime_notifyListWait(&c.notify, t)
-				c.L.Lock()
-			因此会自动释放锁，并等待信号
+		   sync.Cond.Wait():
+		       c.checker.check()
+		       t := runtime_notifyListAdd(&c.notify)
+		       c.L.Unlock()
+		       runtime_notifyListWait(&c.notify, t)
+		       c.L.Lock()
+		   因此会自动释放锁，并等待信号
 		*/
 
 		// 如果有需要提交的日志
@@ -230,26 +247,42 @@ func (rf *Raft) commit() {
 
 		// State Machine Safety: if a server has applied a log entry at a given index to its state machine, no other server
 		// will ever apply a different log entry for the same index. §5.4.3
-		for rf.commitIndex > rf.lastApplied {
-			rf.lastApplied++
-			if rf.hasAppliedBySnapshot() {
-				continue
-			}
+		buffer := []*ApplyMsg{}
+        lastApplied := rf.lastApplied
+        for rf.commitIndex > lastApplied {
+            lastApplied++
+            if lastApplied <= rf.lastIncludedIndex {
+                continue
+            }
+            buffer = append(buffer, &ApplyMsg{
+                CommandValid: true,
+                Command:      rf.log[rf.getPhysicalIndex(lastApplied)].Command,
+                CommandIndex: lastApplied,   
+                // Lab 4（与Lab 3无关）             
+                CommandTerm:  rf.log[rf.getPhysicalIndex(lastApplied)].Term,
+            })
+        }
+        rf.mu.Unlock()
 
-			if Debug && rf.commitIndex == rf.lastApplied {
-				lastAppliedMsg := DApplier{}
-				lastAppliedMsg.ApplyWithLog(rf)
-				DApplierPrint(rf, &lastAppliedMsg)
-			}
-			// Leader: If command received from client: append entry to local log, respond after entry applied to state machine (§5.3)
-			// Follower: entry applied to state machine when leader allowing
-			rf.applyCh <- ApplyMsg{
-				CommandValid: true,
-				Command:      rf.log[rf.getPhysicalIndex(rf.lastApplied)].Command,
-				CommandIndex: rf.lastApplied,
-			}
-		}
-		rf.mu.Unlock()
+        for _, msg := range buffer {
+        
+            rf.mu.Lock()
+            if msg.CommandIndex != rf.lastApplied+1 {
+                rf.mu.Unlock()
+                continue
+            }
+            rf.mu.Unlock()
+
+            rf.applyCh <- *msg
+
+            rf.mu.Lock()
+            if msg.CommandIndex != rf.lastApplied+1 {
+                rf.mu.Unlock()
+                continue
+            }
+            rf.lastApplied = msg.CommandIndex
+            rf.mu.Unlock()
+        }
 	}
 }
 
@@ -259,12 +292,8 @@ func (rf *Raft) commit() {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
-
-	if rf.mu.TryLock() {
-		defer rf.mu.Unlock()
-	} else {
-		DPrintf("Warn: Snapshot() do not have a mutex lock")
-	}
+    rf.mu.Lock()
+    defer rf.mu.Unlock()
 
 	// Save snapshot file, discard any existing or partial snapshot with a smaller index
 	if !rf.acceptSnapshot(index) {
@@ -279,7 +308,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.log = rf.log[rf.getPhysicalIndex(index):]
 
 	// if accept(index > rf.lastIncludedIndex) => rf.lastIncludedIndex = max(rf.lastIncludedIndex, index)
-	// Snapshot()很有可能不拥有锁，因此必须遵守常规的顺序: trim log => update lastIncludedIndex
 	rf.lastIncludedIndex = max(rf.lastIncludedIndex, index)
 
 	rf.commitIndex = max(index, rf.commitIndex)
@@ -636,7 +664,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	})
 	rf.persist()
-
+	rf.fastOpt()
 	return newLogIndex, rf.currentTerm, true
 }
 
@@ -655,6 +683,7 @@ func (rf *Raft) Kill() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	rf.electionTicker.Stop()
+	rf.heartbeatTicker.Stop()
 
 	DPrintf("Server killed:%v", rf.me)
 	DServerPrint(rf)
@@ -732,6 +761,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	// 3A
 	rf.ConvertToFollower(InitTerm).VoteTo(NoVote)
 	rf.electionTicker = time.NewTicker(1)
+	rf.heartbeatTicker = time.NewTicker(1)
 	rf.delayElection()
 
 	// 3B
