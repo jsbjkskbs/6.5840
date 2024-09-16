@@ -26,16 +26,27 @@ type Config struct {
 	Num    int              // config number
 	Shards [NShards]int     // shard -> gid
 	Groups map[int][]string // gid -> servers[]
+
+	// ignore this
+	buffer map[int][]string 
 }
 
 const (
-	OK = "OK"
+	OK             = "OK"
+	ErrNoKey       = "ErrNoKey"
+	ErrWrongLeader = "ErrWrongLeader"
+	ErrTimeout     = "ErrTimeout"
+	ErrRPCFailed   = "ErrRPCFailed"
+	ErrOthers      = "ErrOthers"
 )
 
 type Err string
 
 type JoinArgs struct {
 	Servers map[int][]string // new GID -> servers mappings
+
+	Index int64
+	Clerk int64
 }
 
 type JoinReply struct {
@@ -45,6 +56,9 @@ type JoinReply struct {
 
 type LeaveArgs struct {
 	GIDs []int
+
+	Index int64
+	Clerk int64
 }
 
 type LeaveReply struct {
@@ -55,6 +69,9 @@ type LeaveReply struct {
 type MoveArgs struct {
 	Shard int
 	GID   int
+
+	Index int64
+	Clerk int64
 }
 
 type MoveReply struct {
@@ -64,6 +81,9 @@ type MoveReply struct {
 
 type QueryArgs struct {
 	Num int // desired config number
+
+	Index int64
+	Clerk int64
 }
 
 type QueryReply struct {

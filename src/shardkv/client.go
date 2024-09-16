@@ -14,6 +14,12 @@ import "math/big"
 import "6.5840/shardctrler"
 import "time"
 
+/*
+const (
+	QueryInterval = 100 * time.Millisecond
+)
+*/
+
 // which shard is a key in?
 // please use this function,
 // and please do not change it.
@@ -33,11 +39,18 @@ func nrand() int64 {
 	return x
 }
 
+func (ck *Clerk) getIndex(shard int) int64 {
+	ck.index[shard]++
+	return ck.index[shard]
+}
+
 type Clerk struct {
 	sm       *shardctrler.Clerk
 	config   shardctrler.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	id    int64
+	index [shardctrler.NShards]int64
 }
 
 // the tester calls MakeClerk.
@@ -52,6 +65,8 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardctrler.MakeClerk(ctrlers)
 	ck.make_end = make_end
 	// You'll have to add code here.
+
+	ck.id = nrand()
 	return ck
 }
 
@@ -61,10 +76,14 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 // You will have to modify this function.
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
+	shard := key2shard(key)
 	args.Key = key
 
+	args.Clerk = ck.id
+	args.Index = ck.getIndex(shard)
+	args.Shard = shard
 	for {
-		shard := key2shard(key)
+		// shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
@@ -93,13 +112,17 @@ func (ck *Clerk) Get(key string) string {
 // You will have to modify this function.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args := PutAppendArgs{}
+	shard := key2shard(key)
 	args.Key = key
 	args.Value = value
 	args.Op = op
 
+	args.Clerk = ck.id
+	args.Index = ck.getIndex(shard)
+	args.Shard = shard
 
 	for {
-		shard := key2shard(key)
+		// shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
